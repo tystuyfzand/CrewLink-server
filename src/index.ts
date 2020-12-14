@@ -14,6 +14,7 @@ const port = parseInt(process.env.PORT || (httpsEnabled ? '443' : '9736'));
 
 const sslCertificatePath = process.env.SSLPATH || process.cwd();
 const supportedVersions = readdirSync(join(process.cwd(), 'offsets')).map(file => file.replace('.yml', ''));
+const serverVersion = '1.1.6';
 
 const logger = Tracer.colorConsole({
 	format: "{{timestamp}} <{{title}}> {{message}}"
@@ -62,6 +63,7 @@ app.get('/health', (req, res) => {
 io.on('connection', (socket: socketIO.Socket) => {
 	connectionCount++;
 	logger.info("Total connected: %d", connectionCount);
+	socket.emit('version', serverVersion);
 	let code: string | null = null;
 
 	socket.on('join', (c: string, id: number) => {
