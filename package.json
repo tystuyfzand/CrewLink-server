@@ -4,12 +4,15 @@
  "main": "index.js",
  "license": "GPL-3.0-or-later",
  "dependencies": {
+  "@types/ws": "^7.4.0",
   "express": "^4.17.1",
   "morgan": "^1.10.0",
   "public-ip": "^4.0.2",
   "pug": "^3.0.0",
+  "snowflake-id": "^1.1.0",
   "socket.io": "^2.3.0",
-  "tracer": "^1.1.4"
+  "tracer": "^1.1.4",
+  "ws": "^7.4.1"
  },
  "scripts": {
   "start": "yarn compile && node dist/index.js",
