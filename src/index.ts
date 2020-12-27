@@ -1,23 +1,23 @@
 import express from 'express';
-import { Server } from 'http';
+import { Server, IncomingMessage } from 'http';
 import { Server as HttpsServer } from 'https';
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import Tracer from 'tracer';
 import morgan from 'morgan';
-import publicIp from 'public-ip';
 import WebSocket from 'ws';
 import Room from './room';
 import Connection from './connection';
 import { Events } from './events';
 import SnowflakeId from 'snowflake-id';
+import { Socket } from 'net';
 
+const supportedCrewLinkVersions = new Set(['1.2.0']);
 const httpsEnabled = !!process.env.HTTPS;
 
-const port = parseInt(process.env.PORT || (httpsEnabled ? '443' : '9736'));
+const port = process.env.PORT || (httpsEnabled ? '443' : '9736');
 
 const sslCertificatePath = process.env.SSLPATH || process.cwd();
-const supportedVersions = readdirSync(join(process.cwd(), 'offsets')).map(file => file.replace('.yml', ''));
 
 const logger = Tracer.colorConsole({
 	format: "{{timestamp}} <{{title}}> {{message}}"
@@ -35,10 +35,9 @@ if (httpsEnabled) {
 }
 
 const wss = new WebSocket.Server({
-	server,
+	noServer: true,
 	perMessageDeflate: {
 		zlibDeflateOptions: {
-			// See zlib defaults.
 			chunkSize: 1024,
 			memLevel: 7,
 			level: 3
@@ -46,14 +45,34 @@ const wss = new WebSocket.Server({
 		zlibInflateOptions: {
 			chunkSize: 10 * 1024
 		},
-		// Other options settable:
-		clientNoContextTakeover: true, // Defaults to negotiated value.
-		serverNoContextTakeover: true, // Defaults to negotiated value.
-		serverMaxWindowBits: 10, // Defaults to negotiated value.
-		// Below options specified as default values.
-		concurrencyLimit: 10, // Limits zlib concurrency for perf.
-		threshold: 1024 // Size (in bytes) below which messages
-		// should not be compressed.
+		clientNoContextTakeover: true,
+		serverNoContextTakeover: true,
+		serverMaxWindowBits: 10,
+		concurrencyLimit: 10,
+		threshold: 1024
+	}
+});
+
+server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer)  => {
+	const userAgent = request.headers['user-agent'];
+	const matches = /^CrewLink\/(\d+\.\d+\.\d+) \((\w+)\)$/.exec(userAgent);
+	const error = 'The voice server does not support your version of CrewLink.\nSupported versions: ' + Array.from(supportedCrewLinkVersions).join();
+	if (!matches) {
+		wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+			ws.close(4000, error);
+		});
+	} else {
+		const version = matches[1];
+		// const platform = matches[2];
+		if (supportedCrewLinkVersions.has(version)) {
+			wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+				wss.emit('connection', ws);
+			});
+		} else {
+			wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+				ws.close(4000, error);
+			});
+		}
 	}
 });
 
@@ -64,9 +83,13 @@ const snowflake = new SnowflakeId({
 
 app.set('view engine', 'pug')
 app.use(morgan('combined'))
-app.use(express.static('offsets'))
+
 let connectionCount = 0;
 let address = process.env.ADDRESS;
+if (!address) {
+	logger.error('You must set the ADDRESS environment variable.');
+	process.exit(1);
+}
 
 app.get('/', (_, res) => {
 	res.render('index', { connectionCount, address });
@@ -77,8 +100,7 @@ app.get('/health', (req, res) => {
 		uptime: process.uptime(),
 		connectionCount,
 		address,
-		name: process.env.NAME,
-		supportedVersions
+		name: process.env.NAME
 	});
 })
 
@@ -154,8 +176,6 @@ wss.on('connection', (socket: WebSocket) => {
 	});
 
 	socket.on('authenticate', (data: any) => {
-		// TODO: Check version
-
 		// Reset connect authentication timeout
 		clearTimeout(connectTimeout);
 
@@ -170,7 +190,7 @@ wss.on('connection', (socket: WebSocket) => {
 		});
 	});
 
-	socket.on('join', (c: string, id: number) => {
+	socket.on('join', (c: string, id: number, clientId: number) => {
 		if (!connection) {
 			socket.terminate();
 			return;
@@ -182,6 +202,14 @@ wss.on('connection', (socket: WebSocket) => {
 
 		if (!room) {
 			rooms.set(c, room = new Room(c));
+		}
+
+		for (let s of room.connections) {
+			if (s.clientId !== null && s.clientId === clientId) {
+				socket.terminate();
+				logger.error(`Socket %s sent invalid join command, attempted spoofing another client`);
+				return;
+			}
 		}
 
 		connection.join(room, id);
@@ -204,6 +232,12 @@ wss.on('connection', (socket: WebSocket) => {
 
 	socket.on('client', (id: number, clientId: number) => {
 		if (!connection) {
+			return;
+		}
+
+		if (connection.clientId != null && connection.clientId !== clientId) {
+			socket.terminate();
+			logger.error(`Socket %s sent invalid id command, attempted spoofing another client`);
 			return;
 		}
 
@@ -272,7 +306,5 @@ wss.on('close', function close() {
 
 server.listen(port);
 (async () => {
-	if (!address)
-		address = `http://${await publicIp.v4()}:${port}`;
 	logger.info('CrewLink Server started: %s', address);
 })();
